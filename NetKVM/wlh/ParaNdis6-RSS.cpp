@@ -13,6 +13,7 @@ static void PrintIndirectionTable(const NDIS_RECEIVE_SCALE_PARAMETERS* Params);
 static void PrintIndirectionTable(const PARANDIS_SCALING_SETTINGS *RSSScalingSetting);
 
 static void PrintRSSSettings(PPARANDIS_RSS_PARAMS RSSParameters);
+static NDIS_STATUS ParaNdis_SetupRSSQueueMap(PARANDIS_ADAPTER *pContext);
 
 static VOID ApplySettings(PPARANDIS_RSS_PARAMS RSSParameters,
         PARANDIS_RSS_MODE NewRSSMode,
@@ -136,15 +137,11 @@ CCHAR FindReceiveQueueForCurrentCpu(PPARANDIS_SCALING_SETTINGS RSSScalingSetting
 }
 
 static
-BOOLEAN AllocateCPUMappingArray(NDIS_HANDLE NdisHandle, PPARANDIS_SCALING_SETTINGS RSSScalingSettings)
+BOOLEAN AllocateCPUMappingArray(PARANDIS_ADAPTER *pContext, PPARANDIS_SCALING_SETTINGS RSSScalingSettings)
 {
     ULONG i;
     ULONG CPUNumber = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
-    PCHAR NewCPUMappingArray = (PCHAR) NdisAllocateMemoryWithTagPriority(
-                                                                            NdisHandle,
-                                                                            sizeof(CCHAR) * CPUNumber,
-                                                                            PARANDIS_MEMORY_TAG,
-                                                                            NormalPoolPriority);
+    PCHAR NewCPUMappingArray = (PCHAR)ParaNdis_AllocateMemory(pContext, sizeof(CCHAR) * CPUNumber);
 
     if(!NewCPUMappingArray)
         return FALSE;
@@ -223,16 +220,18 @@ VOID FillCPUMappingArray(
     }
 }
 
-NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_RSS_PARAMS *RSSParameters,
+NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_ADAPTER *pContext,
                                         const NDIS_RECEIVE_SCALE_PARAMETERS* Params,
                                         UINT ParamsLength,
-                                        PUINT ParamsBytesRead,
-                                        NDIS_HANDLE NdisHandle)
+                                        PUINT ParamsBytesRead)
 {
+    PARANDIS_RSS_PARAMS *RSSParameters = &pContext->RSSParameters;
     ULONG ProcessorMasksSize;
     ULONG IndirectionTableEntries;
 
     *ParamsBytesRead = 0;
+
+    CNdisPassiveWriteAutoLock autoLock(RSSParameters->rwLock);
 
     if((RSSParameters->RSSMode == PARANDIS_RSS_HASHING) &&
         !(Params->Flags & NDIS_RSS_PARAM_FLAG_DISABLE_RSS) &&
@@ -290,7 +289,7 @@ NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_RSS_PARAMS *RSSParameters,
         {
             PrintIndirectionTable(Params);
 
-            if(!AllocateCPUMappingArray(NdisHandle, &RSSParameters->RSSScalingSettings))
+            if(!AllocateCPUMappingArray(pContext, &RSSParameters->RSSScalingSettings))
                 return NDIS_STATUS_RESOURCES;
 
             RSSParameters->RSSScalingSettings.IndirectionTableSize = Params->IndirectionTableSize;
@@ -325,7 +324,10 @@ NDIS_STATUS ParaNdis6_RSSSetParameters( PARANDIS_RSS_PARAMS *RSSParameters,
     }
 
     *ParamsBytesRead += sizeof(NDIS_RECEIVE_SCALE_PARAMETERS);
-    return NDIS_STATUS_SUCCESS;
+
+    ParaNdis_ResetRxClassification(pContext);
+
+    return ParaNdis_SetupRSSQueueMap(pContext);
 }
 
 ULONG ParaNdis6_QueryReceiveHash(const PARANDIS_RSS_PARAMS *RSSParameters,
@@ -353,11 +355,12 @@ ULONG ParaNdis6_QueryReceiveHash(const PARANDIS_RSS_PARAMS *RSSParameters,
     return sizeof(RSSHashKeyParameters->ReceiveHashParameters) + RSSHashKeyParameters->ReceiveHashParameters.HashSecretKeySize;
 }
 
-NDIS_STATUS ParaNdis6_RSSSetReceiveHash(PARANDIS_RSS_PARAMS *RSSParameters,
+NDIS_STATUS ParaNdis6_RSSSetReceiveHash(PARANDIS_ADAPTER *pContext,
                                         const NDIS_RECEIVE_HASH_PARAMETERS* Params,
                                         UINT ParamsLength,
                                         PUINT ParamsBytesRead)
 {
+    PARANDIS_RSS_PARAMS *RSSParameters = &pContext->RSSParameters;
     CNdisPassiveWriteAutoLock autoLock(RSSParameters->rwLock);
 
     if (ParamsLength < sizeof(NDIS_RECEIVE_HASH_PARAMETERS))
@@ -411,6 +414,8 @@ NDIS_STATUS ParaNdis6_RSSSetReceiveHash(PARANDIS_RSS_PARAMS *RSSParameters,
                     ? PARANDIS_RSS_HASHING : PARANDIS_RSS_DISABLED,
                 &RSSParameters->ReceiveHashingSettings, NULL);
     }
+
+    ParaNdis_ResetRxClassification(pContext);
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -674,6 +679,100 @@ static void PrintRSSSettings(const PPARANDIS_RSS_PARAMS RSSParameters)
 
     DPrintf(RSS_PRINT_LEVEL, "Queue indirection table[%u]: ", RSSParameters->ReceiveQueuesNumber);
     ParaNdis_PrintCharArray(RSS_PRINT_LEVEL, RSSParameters->ActiveRSSScalingSettings.QueueIndirectionTable, RSSParameters->ReceiveQueuesNumber);
+}
+
+NDIS_STATUS ParaNdis_SetupRSSQueueMap(PARANDIS_ADAPTER *pContext)
+{
+    USHORT rssIndex, bundleIndex;
+    ULONG cpuIndex;
+    ULONG rssTableSize = pContext->RSSParameters.RSSScalingSettings.IndirectionTableSize / sizeof(PROCESSOR_NUMBER);
+
+    rssIndex = 0;
+    bundleIndex = 0;
+    USHORT *cpuIndexTable;
+    ULONG cpuNumbers;
+
+    cpuNumbers = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+
+    cpuIndexTable = (USHORT *)NdisAllocateMemoryWithTagPriority(pContext->MiniportHandle, cpuNumbers * sizeof(*cpuIndexTable),
+        PARANDIS_MEMORY_TAG, NormalPoolPriority);
+    if (cpuIndexTable == nullptr)
+    {
+        DPrintf(0, "[%s] cpu index table allocation failed\n", __FUNCTION__);
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    NdisZeroMemory(cpuIndexTable, sizeof(*cpuIndexTable) * cpuNumbers);
+
+    for (bundleIndex = 0; bundleIndex < pContext->nPathBundles; ++bundleIndex)
+    {
+        cpuIndex = pContext->pPathBundles[bundleIndex].rxPath.getCPUIndex();
+        if (cpuIndex == INVALID_PROCESSOR_INDEX)
+        {
+            DPrintf(0, "[%s]  Invalid CPU index for path %u\n", __FUNCTION__, bundleIndex);
+            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
+            return NDIS_STATUS_SOFT_ERRORS;
+        }
+        else if (cpuIndex >= cpuNumbers)
+        {
+            DPrintf(0, "[%s]  CPU index %lu exceeds CPU range %lu\n", __FUNCTION__, cpuIndex, cpuNumbers);
+            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
+            return NDIS_STATUS_SOFT_ERRORS;
+        }
+        else
+        {
+            cpuIndexTable[cpuIndex] = bundleIndex;
+        }
+    }
+
+    DPrintf(0, "[%s] Entering, RSS table size = %lu, # of path bundles = %u. RSS2QueueLength = %u, RSS2QueueMap =0x%p\n",
+        __FUNCTION__, rssTableSize, pContext->nPathBundles,
+        pContext->RSS2QueueLength, pContext->RSS2QueueMap);
+
+    if (pContext->RSS2QueueLength && pContext->RSS2QueueLength < rssTableSize)
+    {
+        DPrintf(0, "[%s] Freeing RSS2Queue Map\n", __FUNCTION__);
+        NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, pContext->RSS2QueueMap, PARANDIS_MEMORY_TAG);
+        pContext->RSS2QueueLength = 0;
+    }
+
+    if (!pContext->RSS2QueueLength)
+    {
+        pContext->RSS2QueueLength = USHORT(rssTableSize);
+        pContext->RSS2QueueMap = (CPUPathBundle **)NdisAllocateMemoryWithTagPriority(pContext->MiniportHandle, rssTableSize * sizeof(*pContext->RSS2QueueMap),
+            PARANDIS_MEMORY_TAG, NormalPoolPriority);
+        if (pContext->RSS2QueueMap == nullptr)
+        {
+            DPrintf(0, "[%s] - Allocating RSS to queue mapping failed\n", __FUNCTION__);
+            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
+            return NDIS_STATUS_RESOURCES;
+        }
+
+        NdisZeroMemory(pContext->RSS2QueueMap, sizeof(*pContext->RSS2QueueMap) * pContext->RSS2QueueLength);
+    }
+
+    for (rssIndex = 0; rssIndex < rssTableSize; rssIndex++)
+    {
+        pContext->RSS2QueueMap[rssIndex] = pContext->pPathBundles;
+    }
+
+    for (rssIndex = 0; rssIndex < rssTableSize; rssIndex++)
+    {
+        cpuIndex = NdisProcessorNumberToIndex(pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex]);
+        bundleIndex = cpuIndexTable[cpuIndex];
+
+        DPrintf(3, "[%s] filling the relationship, rssIndex = %u, bundleIndex = %u\n", __FUNCTION__, rssIndex, bundleIndex);
+        DPrintf(3, "[%s] RSS proc number %u/%u, bundle affinity %u/%llu\n", __FUNCTION__,
+            pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex].Group,
+            pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex].Number,
+            pContext->pPathBundles[bundleIndex].txPath.DPCAffinity.Group,
+            pContext->pPathBundles[bundleIndex].txPath.DPCAffinity.Mask);
+
+        pContext->RSS2QueueMap[rssIndex] = pContext->pPathBundles + bundleIndex;
+    }
+
+    NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
+    return NDIS_STATUS_SUCCESS;
 }
 
 #endif

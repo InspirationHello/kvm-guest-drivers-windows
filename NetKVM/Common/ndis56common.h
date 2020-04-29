@@ -84,6 +84,12 @@ extern "C"
 #define _Function_class_(x)
 #endif
 
+#if defined(_ARM64_)
+#define NETKVM_COPY_RX_DATA
+#endif
+
+typedef struct _tagPARANDIS_ADAPTER PARANDIS_ADAPTER;
+
 #include "ParaNdis-SM.h"
 #include "ParaNdis-RSS.h"
 
@@ -162,7 +168,7 @@ struct CPUPathBundle : public CPlacementAllocatable {
 
 #define PARANDIS_MULTICAST_LIST_SIZE        32
 #define PARANDIS_MEMORY_TAG                 '5muQ'
-#define PARANDIS_DEFAULT_LINK_SPEED         100000000000  // 100Gbps link speed
+#define PARANDIS_DEFAULT_LINK_SPEED         10000000000  // 10Gbps link speed
 #define PARANDIS_MIN_LSO_SEGMENTS           2
 // reported
 #define PARANDIS_MAX_LSO_SIZE               0xF800
@@ -362,6 +368,7 @@ typedef struct _tagPARANDIS_ADAPTER
     NDIS_HANDLE             MiniportHandle;
     NDIS_HANDLE             InterruptHandle;
     NDIS_HANDLE             BufferListsPool;
+    NDIS_HANDLE             BufferListsPoolForArm;
 
     CPciResources           PciResources;
     VirtIODevice            IODevice;
@@ -537,11 +544,6 @@ void ParaNdis_CXDPCWorkBody(PARANDIS_ADAPTER *pContext);
 
 void ParaNdis_ReuseRxNBLs(PNET_BUFFER_LIST pNBL);
 
-#ifdef PARANDIS_SUPPORT_RSS
-VOID ParaNdis_ResetRxClassification(
-    PARANDIS_ADAPTER *pContext);
-#endif
-
 NDIS_STATUS ParaNdis_SetMulticastList(
     PARANDIS_ADAPTER *pContext,
     PVOID Buffer,
@@ -557,72 +559,20 @@ VOID ParaNdis_VirtIODisableIrqSynchronized(
     PARANDIS_ADAPTER *pContext,
     ULONG interruptSource);
 
-void ParaNdis_FreeRxBufferDescriptor(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-BOOLEAN ParaNdis_PerformPacketAnalysis(
-#if PARANDIS_SUPPORT_RSS
-    PPARANDIS_RSS_PARAMS RSSParameters,
-#endif
-    PNET_PACKET_INFO PacketInfo,
-    PVOID HeadersBuffer,
-    ULONG DataLength);
-
-CCHAR ParaNdis_GetScalingDataForPacket(
-    PARANDIS_ADAPTER *pContext,
-    PNET_PACKET_INFO pPacketInfo,
-    PPROCESSOR_NUMBER pTargetProcessor);
-
-#if PARANDIS_SUPPORT_RSS
-NDIS_STATUS ParaNdis_SetupRSSQueueMap(PARANDIS_ADAPTER *pContext);
-#endif
-
-VOID ParaNdis_ReceiveQueueAddBuffer(
-    PPARANDIS_RECEIVE_QUEUE pQueue,
-    pRxNetDescriptor pBuffer);
-
-VOID ParaNdis_ProcessorNumberToGroupAffinity(
+static __inline VOID ParaNdis_ProcessorNumberToGroupAffinity(
     PGROUP_AFFINITY Affinity,
-    const PPROCESSOR_NUMBER Processor);
-
-VOID ParaNdis_QueueRSSDpc(
-    PARANDIS_ADAPTER *pContext,
-    PGROUP_AFFINITY pTargetAffinity);
-
-
-
-
-
+    const PPROCESSOR_NUMBER Processor)
+{
+    Affinity->Group = Processor->Group;
+    Affinity->Mask = 1;
+    Affinity->Mask <<= Processor->Number;
+}
 
 static __inline BOOLEAN
 ParaNDIS_IsQueueInterruptEnabled(struct virtqueue * _vq)
 {
     return virtqueue_is_interrupt_enabled(_vq);
 }
-
-
-void ParaNdis_FreeRxBufferDescriptor(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-CCHAR ParaNdis_GetScalingDataForPacket(
-    PARANDIS_ADAPTER *pContext,
-    PNET_PACKET_INFO pPacketInfo,
-    PPROCESSOR_NUMBER pTargetProcessor);
-
-VOID ParaNdis_ReceiveQueueAddBuffer(
-    PPARANDIS_RECEIVE_QUEUE pQueue,
-    pRxNetDescriptor pBuffer);
-
-VOID ParaNdis_ProcessorNumberToGroupAffinity(
-    PGROUP_AFFINITY Affinity,
-    const PPROCESSOR_NUMBER Processor);
-
-VOID ParaNdis_QueueRSSDpc(
-    PARANDIS_ADAPTER *pContext,
-    ULONG MessageIndex,
-    PGROUP_AFFINITY pTargetAffinity);
 
 VOID ParaNdis_OnPnPEvent(
     PARANDIS_ADAPTER *pContext,
@@ -721,13 +671,6 @@ BOOLEAN ParaNdis_InitialAllocatePhysicalMemory(
 VOID ParaNdis_FreePhysicalMemory(
     PARANDIS_ADAPTER *pContext,
     tCompletePhysicalAddress *pAddresses);
-
-BOOLEAN ParaNdis_BindRxBufferToPacket(
-    PARANDIS_ADAPTER *pContext,
-    pRxNetDescriptor p);
-
-void ParaNdis_UnbindRxBufferFromPacket(
-    pRxNetDescriptor p);
 
 void ParaNdis_RestoreDeviceConfigurationAfterReset(
     PARANDIS_ADAPTER *pContext);

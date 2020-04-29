@@ -882,15 +882,13 @@ bool CNB::CopyHeaders(PVOID Destination, ULONG MaxSize, ULONG &HeadersLength, UL
     }
     else if (m_ParentNBL->IsUdpCSO())
     {
-        Copy(Destination, MaxSize);
+        HeadersLength = Copy(Destination, MaxSize);
         L4HeaderOffset = QueryL4HeaderOffset(Destination, m_Context->Offload.ipHeaderOffset);
-        HeadersLength = L4HeaderOffset + sizeof(UDPHeader);
     }
     else if (m_ParentNBL->IsIPHdrCSO())
     {
-        Copy(Destination, MaxSize);
-        HeadersLength = QueryL4HeaderOffset(Destination, m_Context->Offload.ipHeaderOffset);
-        L4HeaderOffset = HeadersLength;
+        HeadersLength = Copy(Destination, MaxSize);
+        L4HeaderOffset = QueryL4HeaderOffset(Destination, m_Context->Offload.ipHeaderOffset);
     }
     else
     {
@@ -959,7 +957,7 @@ bool CNB::BindToDescriptor(CTXDescriptor &Descriptor)
     return FillDescriptorSGList(Descriptor, HeadersLength);
 }
 
-bool CNB::Copy(PVOID Dst, ULONG Length) const
+ULONG CNB::Copy(PVOID Dst, ULONG Length) const
 {
     ULONG CurrOffset = NET_BUFFER_CURRENT_MDL_OFFSET(m_NB);
     ULONG Copied = 0;
@@ -992,5 +990,5 @@ bool CNB::Copy(PVOID Dst, ULONG Length) const
         CurrOffset = 0;
     }
 
-    return (Copied == Length);
+    return Copied;
 }

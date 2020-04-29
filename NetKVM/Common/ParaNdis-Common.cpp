@@ -401,6 +401,7 @@ static void DumpVirtIOFeatures(PPARANDIS_ADAPTER pContext)
         {VIRTIO_F_ANY_LAYOUT, "VIRTIO_F_ANY_LAYOUT"},
         {VIRTIO_RING_F_EVENT_IDX, "VIRTIO_RING_F_EVENT_IDX"},
         {VIRTIO_F_VERSION_1, "VIRTIO_F_VERSION_1"},
+        {VIRTIO_F_RING_PACKED, "VIRTIO_F_RING_PACKED"},
         {VIRTIO_NET_F_CTRL_GUEST_OFFLOADS, "VIRTIO_NET_F_CTRL_GUEST_OFFLOADS" },
         {VIRTIO_NET_F_RSC_EXT, "VIRTIO_NET_F_RSC_EXT" },
     };
@@ -776,7 +777,11 @@ NDIS_STATUS ParaNdis_InitializeContext(
 
         InitializeLinkPropertiesConfig(pContext);
 
+#if !defined(_ARM64_)
         pContext->bControlQueueSupported = AckFeature(pContext, VIRTIO_NET_F_CTRL_VQ);
+#else
+        DPrintf(0, "[%s] Control queue disabled for ARM64\n", __FUNCTION__);
+#endif
         pContext->bGuestAnnounceSupported = pContext->bLinkDetectSupported && pContext->bControlQueueSupported && AckFeature(pContext, VIRTIO_NET_F_GUEST_ANNOUNCE);
         InitializeMAC(pContext, CurrentMAC);
         InitializeMaxMTUConfig(pContext);
@@ -851,6 +856,12 @@ NDIS_STATUS ParaNdis_InitializeContext(
     if (AckFeature(pContext, VIRTIO_F_VERSION_1))
     {
         pContext->nVirtioHeaderSize = sizeof(virtio_net_hdr_v1);
+        pContext->bAnyLayout = true;
+        DPrintf(0, "[%s] Assuming VIRTIO_F_ANY_LAYOUT for V1 device\n", __FUNCTION__);
+        if (AckFeature(pContext, VIRTIO_F_RING_PACKED))
+        {
+            DPrintf(0, "[%s] Using PACKED ring\n", __FUNCTION__);
+        }
     }
 
     if (pContext->bControlQueueSupported)
@@ -872,21 +883,6 @@ NDIS_STATUS ParaNdis_InitializeContext(
 
     DEBUG_EXIT_STATUS(0, status);
     return status;
-}
-
-void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDescriptor p)
-{
-    ULONG i;
-
-    ParaNdis_UnbindRxBufferFromPacket(p);
-    for(i = 0; i < p->BufferSGLength; i++)
-    {
-        ParaNdis_FreePhysicalMemory(pContext, &p->PhysicalPages[i]);
-    }
-
-    if(p->BufferSGArray) NdisFreeMemory(p->BufferSGArray, 0, 0);
-    if(p->PhysicalPages) NdisFreeMemory(p->PhysicalPages, 0, 0);
-    NdisFreeMemory(p, 0, 0);
 }
 
 #if PARANDIS_SUPPORT_RSS
@@ -983,102 +979,6 @@ static NDIS_STATUS SetupDPCTarget(PARANDIS_ADAPTER *pContext)
 #endif
     return NDIS_STATUS_SUCCESS;
 }
-
-#if PARANDIS_SUPPORT_RSS
-NDIS_STATUS ParaNdis_SetupRSSQueueMap(PARANDIS_ADAPTER *pContext)
-{
-    USHORT rssIndex, bundleIndex;
-    ULONG cpuIndex;
-    ULONG rssTableSize = pContext->RSSParameters.RSSScalingSettings.IndirectionTableSize / sizeof(PROCESSOR_NUMBER);
-
-    rssIndex = 0;
-    bundleIndex = 0;
-    USHORT *cpuIndexTable;
-    ULONG cpuNumbers;
-
-    cpuNumbers = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
-
-    cpuIndexTable = (USHORT *)NdisAllocateMemoryWithTagPriority(pContext->MiniportHandle, cpuNumbers * sizeof(*cpuIndexTable),
-        PARANDIS_MEMORY_TAG, NormalPoolPriority);
-    if (cpuIndexTable == nullptr)
-    {
-        DPrintf(0, "[%s] cpu index table allocation failed\n", __FUNCTION__);
-        return NDIS_STATUS_RESOURCES;
-    }
-
-    NdisZeroMemory(cpuIndexTable, sizeof(*cpuIndexTable) * cpuNumbers);
-
-    for (bundleIndex = 0; bundleIndex < pContext->nPathBundles; ++bundleIndex)
-    {
-        cpuIndex = pContext->pPathBundles[bundleIndex].rxPath.getCPUIndex();
-        if (cpuIndex == INVALID_PROCESSOR_INDEX)
-        {
-            DPrintf(0, "[%s]  Invalid CPU index for path %u\n", __FUNCTION__, bundleIndex);
-            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
-            return NDIS_STATUS_SOFT_ERRORS;
-        }
-        else if (cpuIndex >= cpuNumbers)
-        {
-            DPrintf(0, "[%s]  CPU index %lu exceeds CPU range %lu\n", __FUNCTION__, cpuIndex, cpuNumbers);
-            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
-            return NDIS_STATUS_SOFT_ERRORS;
-        }
-        else
-        {
-            cpuIndexTable[cpuIndex] = bundleIndex;
-        }
-    }
-
-    DPrintf(0, "[%s] Entering, RSS table size = %lu, # of path bundles = %u. RSS2QueueLength = %u, RSS2QueueMap =0x%p\n",
-        __FUNCTION__, rssTableSize, pContext->nPathBundles,
-        pContext->RSS2QueueLength, pContext->RSS2QueueMap);
-
-    if (pContext->RSS2QueueLength && pContext->RSS2QueueLength < rssTableSize)
-    {
-        DPrintf(0, "[%s] Freeing RSS2Queue Map\n", __FUNCTION__);
-        NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, pContext->RSS2QueueMap, PARANDIS_MEMORY_TAG);
-        pContext->RSS2QueueLength = 0;
-    }
-
-    if (!pContext->RSS2QueueLength)
-    {
-        pContext->RSS2QueueLength = USHORT(rssTableSize);
-        pContext->RSS2QueueMap = (CPUPathBundle **)NdisAllocateMemoryWithTagPriority(pContext->MiniportHandle, rssTableSize * sizeof(*pContext->RSS2QueueMap),
-            PARANDIS_MEMORY_TAG, NormalPoolPriority);
-        if (pContext->RSS2QueueMap == nullptr)
-        {
-            DPrintf(0, "[%s] - Allocating RSS to queue mapping failed\n", __FUNCTION__);
-            NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
-            return NDIS_STATUS_RESOURCES;
-        }
-
-        NdisZeroMemory(pContext->RSS2QueueMap, sizeof(*pContext->RSS2QueueMap) * pContext->RSS2QueueLength);
-    }
-
-    for (rssIndex = 0; rssIndex < rssTableSize; rssIndex++)
-    {
-       pContext->RSS2QueueMap[rssIndex] = pContext->pPathBundles;
-    }
-
-    for (rssIndex = 0; rssIndex < rssTableSize; rssIndex++)
-    {
-        cpuIndex = NdisProcessorNumberToIndex(pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex]);
-        bundleIndex = cpuIndexTable[cpuIndex];
-
-        DPrintf(3, "[%s] filling the relationship, rssIndex = %u, bundleIndex = %u\n", __FUNCTION__, rssIndex, bundleIndex);
-        DPrintf(3, "[%s] RSS proc number %u/%u, bundle affinity %u/%llu\n", __FUNCTION__,
-            pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex].Group,
-            pContext->RSSParameters.RSSScalingSettings.IndirectionTable[rssIndex].Number,
-            pContext->pPathBundles[bundleIndex].txPath.DPCAffinity.Group,
-            pContext->pPathBundles[bundleIndex].txPath.DPCAffinity.Mask);
-
-        pContext->RSS2QueueMap[rssIndex] = pContext->pPathBundles + bundleIndex;
-    }
-
-    NdisFreeMemoryWithTagPriority(pContext->MiniportHandle, cpuIndexTable, PARANDIS_MEMORY_TAG);
-    return NDIS_STATUS_SUCCESS;
-}
-#endif
 
 /**********************************************************
 Initializes VirtIO buffering and related stuff:
@@ -1532,47 +1432,6 @@ static ULONG ShallPassPacket(PARANDIS_ADAPTER *pContext, PNET_PACKET_INFO pPacke
     return FALSE;
 }
 
-BOOLEAN ParaNdis_PerformPacketAnalysis(
-#if PARANDIS_SUPPORT_RSS
-                            PPARANDIS_RSS_PARAMS RSSParameters,
-#endif
-                            PNET_PACKET_INFO PacketInfo,
-                            PVOID HeadersBuffer,
-                            ULONG DataLength)
-{
-    if(!ParaNdis_AnalyzeReceivedPacket(HeadersBuffer, DataLength, PacketInfo))
-        return FALSE;
-
-#if PARANDIS_SUPPORT_RSS
-    if(RSSParameters->RSSMode != PARANDIS_RSS_DISABLED)
-    {
-        ParaNdis6_RSSAnalyzeReceivedPacket(RSSParameters, HeadersBuffer, PacketInfo);
-    }
-#endif
-    return TRUE;
-}
-
-VOID ParaNdis_ProcessorNumberToGroupAffinity(PGROUP_AFFINITY Affinity, const PPROCESSOR_NUMBER Processor)
-{
-    Affinity->Group = Processor->Group;
-    Affinity->Mask = 1;
-    Affinity->Mask <<= Processor->Number;
-}
-
-
-CCHAR ParaNdis_GetScalingDataForPacket(PARANDIS_ADAPTER *pContext, PNET_PACKET_INFO pPacketInfo, PPROCESSOR_NUMBER pTargetProcessor)
-{
-#if PARANDIS_SUPPORT_RSS
-    return ParaNdis6_RSSGetScalingDataForPacket(&pContext->RSSParameters, pPacketInfo, pTargetProcessor);
-#else
-    UNREFERENCED_PARAMETER(pContext);
-    UNREFERENCED_PARAMETER(pPacketInfo);
-    UNREFERENCED_PARAMETER(pTargetProcessor);
-
-    return PARANDIS_RECEIVE_UNCLASSIFIED_PACKET;
-#endif
-}
-
 static __inline
 CCHAR GetReceiveQueueForCurrentCPU(PARANDIS_ADAPTER *pContext)
 {
@@ -1583,27 +1442,6 @@ CCHAR GetReceiveQueueForCurrentCPU(PARANDIS_ADAPTER *pContext)
 
     return PARANDIS_RECEIVE_NO_QUEUE;
 #endif
-}
-
-VOID ParaNdis_QueueRSSDpc(PARANDIS_ADAPTER *pContext, ULONG MessageIndex, PGROUP_AFFINITY pTargetAffinity)
-{
-#if PARANDIS_SUPPORT_RSS
-    NdisMQueueDpcEx(pContext->InterruptHandle, MessageIndex, pTargetAffinity, NULL);
-#else
-    UNREFERENCED_PARAMETER(pContext);
-    UNREFERENCED_PARAMETER(MessageIndex);
-    UNREFERENCED_PARAMETER(pTargetAffinity);
-
-    NETKVM_ASSERT(FALSE);
-#endif
-}
-
-
-VOID ParaNdis_ReceiveQueueAddBuffer(PPARANDIS_RECEIVE_QUEUE pQueue, pRxNetDescriptor pBuffer)
-{
-    NdisInterlockedInsertTailList(  &pQueue->BuffersList,
-                                    &pBuffer->ReceiveQueueListEntry,
-                                    &pQueue->Lock);
 }
 
 static __inline
@@ -1792,7 +1630,9 @@ BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULO
         pathBundle->rxPath.UnclassifiedPacketsQueue().Ownership.Release();
     }
 
-    if (pathBundle != nullptr)
+    // we do not need to make a check of rx queue restart etc. if we already know
+    // that we need to respawn the DPC to get more data from the queue
+    if (pathBundle != nullptr && res == 0)
     {
         res |= pathBundle->rxPath.RestartQueue() |
                ReceiveQueueHasBuffers(&pathBundle->rxPath.UnclassifiedPacketsQueue());
@@ -1893,28 +1733,6 @@ bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIn
     }
     return stillRequiresProcessing;
 }
-
-#ifdef PARANDIS_SUPPORT_RSS
-VOID ParaNdis_ResetRxClassification(PARANDIS_ADAPTER *pContext)
-{
-    ULONG i;
-
-    for(i = PARANDIS_FIRST_RSS_RECEIVE_QUEUE; i < ARRAYSIZE(pContext->ReceiveQueues); i++)
-    {
-        PPARANDIS_RECEIVE_QUEUE pCurrQueue = &pContext->ReceiveQueues[i];
-        NdisAcquireSpinLock(&pCurrQueue->Lock);
-
-        while(!IsListEmpty(&pCurrQueue->BuffersList))
-        {
-            PLIST_ENTRY pListEntry = RemoveHeadList(&pCurrQueue->BuffersList);
-            pRxNetDescriptor pBufferDescriptor = CONTAINING_RECORD(pListEntry, RxNetDescriptor, ReceiveQueueListEntry);
-            ParaNdis_ReceiveQueueAddBuffer(&pBufferDescriptor->Queue->UnclassifiedPacketsQueue(), pBufferDescriptor);
-        }
-
-        NdisReleaseSpinLock(&pCurrQueue->Lock);
-    }
-}
-#endif
 
 /**********************************************************
 Common handler of multicast address configuration

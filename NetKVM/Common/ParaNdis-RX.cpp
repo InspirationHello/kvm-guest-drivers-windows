@@ -6,6 +6,72 @@
 #include "ParaNdis-RX.tmh"
 #endif
 
+static FORCEINLINE VOID ParaNdis_ReceiveQueueAddBuffer(PPARANDIS_RECEIVE_QUEUE pQueue, pRxNetDescriptor pBuffer)
+{
+    NdisInterlockedInsertTailList(&pQueue->BuffersList,
+        &pBuffer->ReceiveQueueListEntry,
+        &pQueue->Lock);
+}
+
+static void ParaNdis_UnbindRxBufferFromPacket(
+    pRxNetDescriptor p)
+{
+    PMDL NextMdlLinkage = p->Holder;
+    ULONG ulPageDescIndex = PARANDIS_FIRST_RX_DATA_PAGE;
+
+    while (NextMdlLinkage != NULL)
+    {
+        PMDL pThisMDL = NextMdlLinkage;
+        NextMdlLinkage = NDIS_MDL_LINKAGE(pThisMDL);
+
+        NdisAdjustMdlLength(pThisMDL, p->PhysicalPages[ulPageDescIndex].size);
+        NdisFreeMdl(pThisMDL);
+        ulPageDescIndex++;
+    }
+}
+
+static BOOLEAN ParaNdis_BindRxBufferToPacket(
+    PARANDIS_ADAPTER *pContext,
+    pRxNetDescriptor p)
+{
+    ULONG i;
+    PMDL *NextMdlLinkage = &p->Holder;
+
+    for (i = PARANDIS_FIRST_RX_DATA_PAGE; i < p->BufferSGLength; i++)
+    {
+        *NextMdlLinkage = NdisAllocateMdl(
+            pContext->MiniportHandle,
+            p->PhysicalPages[i].Virtual,
+            p->PhysicalPages[i].size);
+        if (*NextMdlLinkage == NULL) goto error_exit;
+
+        NextMdlLinkage = &(NDIS_MDL_LINKAGE(*NextMdlLinkage));
+    }
+    *NextMdlLinkage = NULL;
+
+    return TRUE;
+
+error_exit:
+
+    ParaNdis_UnbindRxBufferFromPacket(p);
+    return FALSE;
+}
+
+static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDescriptor p)
+{
+    ULONG i;
+
+    ParaNdis_UnbindRxBufferFromPacket(p);
+    for (i = 0; i < p->BufferSGLength; i++)
+    {
+        ParaNdis_FreePhysicalMemory(pContext, &p->PhysicalPages[i]);
+    }
+
+    if (p->BufferSGArray) NdisFreeMemory(p->BufferSGArray, 0, 0);
+    if (p->PhysicalPages) NdisFreeMemory(p->PhysicalPages, 0, 0);
+    NdisFreeMemory(p, 0, 0);
+}
+
 CParaNdisRX::CParaNdisRX() : m_nReusedRxBuffersCounter(0), m_NetNofReceiveBuffers(0)
 {
     InitializeListHead(&m_NetReceiveBuffers);
@@ -32,9 +98,9 @@ bool CParaNdisRX::Create(PPARANDIS_ADAPTER Context, UINT DeviceQueueIndex)
         return false;
     }
 
-    m_nReusedRxBuffersLimit = m_Context->NetMaxReceiveBuffers / 4 + 1;
-
     PrepareReceiveBuffers();
+
+    m_nReusedRxBuffersLimit = m_Context->NetMaxReceiveBuffers / 4 + 1;
 
     CreatePath();
 
@@ -200,6 +266,38 @@ VOID CParaNdisRX::KickRXRing()
     m_VirtQueue.Kick();
 }
 
+#if PARANDIS_SUPPORT_RSS
+static FORCEINLINE VOID ParaNdis_QueueRSSDpc(PARANDIS_ADAPTER *pContext, ULONG MessageIndex, PGROUP_AFFINITY pTargetAffinity)
+{
+    NdisMQueueDpcEx(pContext->InterruptHandle, MessageIndex, pTargetAffinity, NULL);
+}
+
+static FORCEINLINE CCHAR ParaNdis_GetScalingDataForPacket(PARANDIS_ADAPTER *pContext, PNET_PACKET_INFO pPacketInfo, PPROCESSOR_NUMBER pTargetProcessor)
+{
+    return ParaNdis6_RSSGetScalingDataForPacket(&pContext->RSSParameters, pPacketInfo, pTargetProcessor);
+}
+#endif
+
+static FORCEINLINE BOOLEAN ParaNdis_PerformPacketAnalysis(
+#if PARANDIS_SUPPORT_RSS
+    PPARANDIS_RSS_PARAMS RSSParameters,
+#endif
+    PNET_PACKET_INFO PacketInfo,
+    PVOID HeadersBuffer,
+    ULONG DataLength)
+{
+    if (!ParaNdis_AnalyzeReceivedPacket(HeadersBuffer, DataLength, PacketInfo))
+        return FALSE;
+
+#if PARANDIS_SUPPORT_RSS
+    if (RSSParameters->RSSMode != PARANDIS_RSS_DISABLED)
+    {
+        ParaNdis6_RSSAnalyzeReceivedPacket(RSSParameters, HeadersBuffer, PacketInfo);
+    }
+#endif
+    return TRUE;
+}
+
 VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
 {
     pRxNetDescriptor pBufferDescriptor;
@@ -308,3 +406,25 @@ BOOLEAN CParaNdisRX::RestartQueue()
                                              RestartQueueSynchronously,
                                              this);
 }
+
+#ifdef PARANDIS_SUPPORT_RSS
+VOID ParaNdis_ResetRxClassification(PARANDIS_ADAPTER *pContext)
+{
+    ULONG i;
+
+    for (i = PARANDIS_FIRST_RSS_RECEIVE_QUEUE; i < ARRAYSIZE(pContext->ReceiveQueues); i++)
+    {
+        PPARANDIS_RECEIVE_QUEUE pCurrQueue = &pContext->ReceiveQueues[i];
+        NdisAcquireSpinLock(&pCurrQueue->Lock);
+
+        while (!IsListEmpty(&pCurrQueue->BuffersList))
+        {
+            PLIST_ENTRY pListEntry = RemoveHeadList(&pCurrQueue->BuffersList);
+            pRxNetDescriptor pBufferDescriptor = CONTAINING_RECORD(pListEntry, RxNetDescriptor, ReceiveQueueListEntry);
+            ParaNdis_ReceiveQueueAddBuffer(&pBufferDescriptor->Queue->UnclassifiedPacketsQueue(), pBufferDescriptor);
+        }
+
+        NdisReleaseSpinLock(&pCurrQueue->Lock);
+    }
+}
+#endif
