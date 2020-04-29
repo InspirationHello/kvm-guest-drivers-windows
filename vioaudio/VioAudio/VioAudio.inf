@@ -1,0 +1,80 @@
+;
+; VioAudio.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System ; Sample ; TODO: edit Class
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318} ;{78A1C341-4539-11d3-B88D-00C04FAD5171}
+Provider=%ManufacturerName%
+CatalogFile=VioAudio.cat
+DriverVer= 08/22/2019,100.6.101.58000
+
+[DestinationDirs]
+DefaultDestDir = 12
+VioAudio_Device_CoInstaller_CopyFiles = 11
+
+; ================= Class section =====================
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+VioAudio.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with SourceDisksNames
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%VioAudio.DeviceDesc%=VioAudio_Device, PCI\VEN_1AF4&DEV_1006&SUBSYS_000D1AF4&REV_00, PCI\VEN_1AF4&DEV_1006
+
+[VioAudio_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+VioAudio.sys
+
+
+;-------------- Service installation
+[VioAudio_Device.NT.Services]
+AddService = VioAudio,%SPSVCINST_ASSOCSERVICE%, VioAudio_Service_Inst
+
+; -------------- VioAudio driver install sections
+[VioAudio_Service_Inst]
+DisplayName    = %VioAudio.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\VioAudio.sys
+
+;
+;--- VioAudio_Device Coinstaller installation ------
+;
+
+[VioAudio_Device.NT.CoInstallers]
+AddReg=VioAudio_Device_CoInstaller_AddReg
+CopyFiles=VioAudio_Device_CoInstaller_CopyFiles
+
+[VioAudio_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[VioAudio_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[VioAudio_Device.NT.Wdf]
+KmdfService =  VioAudio, VioAudio_wdfsect
+[VioAudio_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="VioAudio, Inc." ;TODO: Replace with your manufacturer name
+ClassName="VirtIO Audio Device" ; TODO: edit ClassName
+DiskName = "VioAudio Installation Disk"
+VioAudio.DeviceDesc = "VioAudio Device"
+VioAudio.SVCDESC = "VioAudio Service"

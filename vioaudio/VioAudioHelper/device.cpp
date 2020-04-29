@@ -1,9 +1,9 @@
 #include "precomp.h"
 
-CDevice::CDevice() :
+CDevice::CDevice(const wchar_t* Path) :
 m_hDevice(INVALID_HANDLE_VALUE)
 {
-    Init();
+    Init(Path);
 }
 
 CDevice::~CDevice()
@@ -11,22 +11,22 @@ CDevice::~CDevice()
     Fini();
 }
 
-DWORD CDevice::Init()
+DWORD CDevice::Init(const wchar_t* Path)
 {
-    PWCHAR DevicePath = GetDevicePath((LPGUID)&GUID_DEVINTERFACE_VioAudio);
+    PWCHAR DevicePath = (Path && wcslen(Path) > 0) ? _wcsdup(Path) : GetDevicePath((LPGUID)&GUID_DEVINTERFACE_VioAudio);
     if (DevicePath == NULL) {
-        PrintMessage("File not found.\n");
+        WarnMessage("File not found.\n");
         return ERROR_FILE_NOT_FOUND;
     }
 
-    PrintMessageW(L"the DevicePath: %s\n", DevicePath);
+    WarnMessageW(L"the DevicePath: %s\n", DevicePath);
     
     m_hDevice = CreateFile(DevicePath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, 0);
     
     free(DevicePath);
 
     if (m_hDevice == INVALID_HANDLE_VALUE) {
-        PrintMessage("Failed to create file.\n");
+        WarnMessage("Failed to create file.\n");
         return GetLastError();
     }
 
@@ -39,6 +39,7 @@ VOID CDevice::Fini()
 
     if (m_hDevice != INVALID_HANDLE_VALUE) {
         CloseHandle(m_hDevice);
+		m_hDevice = INVALID_HANDLE_VALUE;
     }
 }
 
@@ -50,13 +51,13 @@ BOOL CDevice::Start()
     char test_write[]= "123456123456123456123456123456123456";
     
     if (IoCtrlTo(IOCTL_VIOAUDIO_SEND_DATA, test_write, sizeof(test_write)) > 0) {
-        PrintMessage("Test write succeeded.\n");
+        WarnMessage("Test write succeeded.\n");
     }
 
     if (!Write(test_write, sizeof(test_write))) {
         char log_info[4096] = { 0 };
         snprintf(log_info, ARRAYSIZE(log_info), "Test WriteFile failed 0X%08x.\n", GetLastError());
-        PrintMessage(log_info);
+        WarnMessage("%s", log_info);
     }
 
     char buffer[256] = { 0 };
@@ -65,10 +66,10 @@ BOOL CDevice::Start()
         char log_info[4096] = { 0 };
         snprintf(log_info, ARRAYSIZE(log_info), "the content: %s\n", buffer);
 
-        PrintMessage(log_info);
+        WarnMessage("%s", log_info);
     }
     else {
-        PrintMessage("Failed to DeviceIoControl IOCTL_VIOAUDIO_GET_DATA\n");
+        WarnMessage("Failed to DeviceIoControl IOCTL_VIOAUDIO_GET_DATA\n");
     }
    
     return TRUE;
@@ -84,12 +85,12 @@ DWORD CDevice::Write(PVOID Buffer, DWORD Size)
     ULONG retedLen = 0;
 
     if (m_hDevice == INVALID_HANDLE_VALUE) {
-        PrintMessage("the device handle is invalid.\n");
+        WarnMessage("the device handle is invalid.\n");
         return 0;
     }
 
     if (!WriteFile(m_hDevice, Buffer, Size, &retedLen, NULL)) {
-        PrintMessage("WriteFile failed with 0X%08x.\n", GetLastError());
+        WarnMessage("WriteFile failed with 0X%08x.\n", GetLastError());
         return 0;
     }
 
@@ -101,12 +102,12 @@ DWORD CDevice::Read(PVOID Buffer, DWORD Size)
     ULONG retedLen = 0;
 
     if (m_hDevice == INVALID_HANDLE_VALUE) {
-        PrintMessage("the device handle is invalid.\n");
+        WarnMessage("the device handle is invalid.\n");
         return 0;
     }
 
     if (!ReadFile(m_hDevice, Buffer, Size, &retedLen, NULL)) {
-        PrintMessage("ReadFile failed with 0X%08x.\n", GetLastError());
+        WarnMessage("ReadFile failed with 0X%08x.\n", GetLastError());
         return 0;
     }
 
@@ -118,12 +119,12 @@ DWORD CDevice::IoCtrlFrom(DWORD CtrlCode, PVOID OutBuffer, DWORD OutSize)
     ULONG retedLen = 0;
 
     if (m_hDevice == INVALID_HANDLE_VALUE) {
-        PrintMessage("the device handle is invalid.\n");
+        WarnMessage("the device handle is invalid.\n");
         return 0;
     }
 
     if (DeviceIoControl(m_hDevice, CtrlCode, NULL, 0, OutBuffer, OutSize, &retedLen, NULL)) {
-        PrintMessage("IoCtrlFrom failed with 0X%08x.\n", GetLastError());
+        WarnMessage("IoCtrlFrom failed with 0X%08x.\n", GetLastError());
         return 0;
     }
 
@@ -135,12 +136,12 @@ DWORD CDevice::IoCtrlTo(DWORD CtrlCode, PVOID InBuffer, DWORD InSize)
     ULONG retedLen = 0;
 
     if (m_hDevice == INVALID_HANDLE_VALUE) {
-        PrintMessage("the device handle is invalid.\n");
+        WarnMessage("the device handle is invalid.\n");
         return 0;
     }
 
     if (DeviceIoControl(m_hDevice, CtrlCode, NULL, 0, InBuffer, InSize, &retedLen, NULL)) {
-        PrintMessage("IoCtrlTo failed with 0X%08x.\n", GetLastError());
+        WarnMessage("IoCtrlTo failed with 0X%08x.\n", GetLastError());
         return 0;
     }
 
@@ -166,7 +167,7 @@ PTCHAR CDevice::GetDevicePath( IN  LPGUID InterfaceGuid )
                              );
 
     if (HardwareDeviceInfo == INVALID_HANDLE_VALUE) {
-        PrintMessage("Cannot get class devices");
+        WarnMessage("Cannot get class devices\n");
         return NULL;
     }
 
@@ -181,7 +182,7 @@ PTCHAR CDevice::GetDevicePath( IN  LPGUID InterfaceGuid )
                              );
 
     if (bResult == FALSE) {
-        PrintMessage("Cannot get enumerate device interfaces");
+        WarnMessage("Cannot get enumerate device interfaces\n");
         SetupDiDestroyDeviceInfoList(HardwareDeviceInfo);
         return NULL;
     }
@@ -198,7 +199,7 @@ PTCHAR CDevice::GetDevicePath( IN  LPGUID InterfaceGuid )
     DeviceInterfaceDetailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA) LocalAlloc(LMEM_FIXED, RequiredLength);
 
     if (DeviceInterfaceDetailData == NULL) {
-        PrintMessage("Cannot allocate memory");
+        WarnMessage("Cannot allocate memory\n");
         SetupDiDestroyDeviceInfoList(HardwareDeviceInfo);
         return NULL;
     }
@@ -217,7 +218,7 @@ PTCHAR CDevice::GetDevicePath( IN  LPGUID InterfaceGuid )
                              );
 
     if (bResult == FALSE) {
-        PrintMessage("Cannot get device interface details");
+        WarnMessage("Cannot get device interface details\n");
         SetupDiDestroyDeviceInfoList(HardwareDeviceInfo);
         LocalFree(DeviceInterfaceDetailData);
         return NULL;

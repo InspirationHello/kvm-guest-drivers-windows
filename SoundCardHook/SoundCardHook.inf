@@ -1,0 +1,50 @@
+;
+; SoundCardHook.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Media ; System ; Media
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318} ; {4d36e97d-e325-11ce-bfc1-08002be10318} ; {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+DriverVer=11/06/2019,100.6.101.58000
+CatalogFile=SoundCardHook.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+SoundCardHook.sys  = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%SoundCardHook.DeviceDesc%=SoundCardHook_Device
+
+[SoundCardHook_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+SoundCardHook.sys
+
+[SoundCardHook_Device.NT.Services]
+AddService = SoundCardHook, %SPSVCINST_ASSOCSERVICE%, SoundCardHook_Service_Inst
+
+[SoundCardHook_Service_Inst]
+DisplayName    = %SoundCardHook.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\SoundCardHook.sys
+
+[Strings]
+ManufacturerName="SoundCardHook, Inc."
+ClassName="Sound card hook"
+DiskName="SoundCardHook Source Disk"
+SoundCardHook.DeviceDesc = "Sound card hook Device"
+SoundCardHook.SVCDESC = "Sound card hook Service"
+SPSVCINST_ASSOCSERVICE= 0x00000002

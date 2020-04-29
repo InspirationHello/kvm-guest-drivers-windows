@@ -21,3 +21,6 @@ void VioAudioLogW(const wchar_t *cap, const wchar_t *fmt, ...)
     vfwprintf(stderr, fmt, ap);
     va_end(ap);
 }
+
+
+LONGLONG LatencyDebug::Frequency = 0;

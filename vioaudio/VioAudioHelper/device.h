@@ -5,9 +5,9 @@
 
 class CDevice {
 public:
-    CDevice();
+    CDevice(const wchar_t* Path = L"");
     ~CDevice();
-    DWORD Init();
+    DWORD Init(const wchar_t* Path = L"");
     VOID Fini();
     BOOL Start();
     VOID Stop();
